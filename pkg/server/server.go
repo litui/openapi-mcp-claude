@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	// "fmt" // No longer needed here
@@ -18,7 +17,8 @@ import (
 
 	"github.com/ckanthony/openapi-mcp/pkg/config"
 	"github.com/ckanthony/openapi-mcp/pkg/mcp"
-	"github.com/google/uuid" // Import UUID package
+	"github.com/google/uuid"
+	// Import UUID package
 )
 
 // --- JSON-RPC Structures (Re-introduced for Handshake/Messages) ---
@@ -87,9 +87,8 @@ type ToolResultPayload struct {
 
 // --- Server State ---
 
-// activeConnections stores channels for sending messages back to active SSE clients.
-var activeConnections = make(map[string]chan jsonRPCResponse) // Changed value type
-var connMutex sync.RWMutex
+// Global MCP connection manager instance
+var mcpConnectionManager = NewConnectionManager()
 
 // Channel buffer size
 const messageChannelBufferSize = 10
@@ -101,12 +100,52 @@ func ServeMCP(addr string, toolSet *mcp.ToolSet, cfg *config.Config) error {
 	log.Printf("Preparing ToolSet for MCP...")
 
 	// --- Handler Functions ---
-	mcpHandler := func(w http.ResponseWriter, r *http.Request) {
+	sseHandler := func(w http.ResponseWriter, r *http.Request) {
+		// CORS Headers (Apply to all relevant requests)
+		w.Header().Set("Access-Control-Allow-Origin", "*") // Be more specific in production
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
+
+		if r.Method == http.MethodOptions {
+			log.Println("Responding to OPTIONS request")
+			w.WriteHeader(http.StatusNoContent) // Use 204 No Content for OPTIONS
+			return
+		}
+
+		// SSE connections can be GET type
+		if r.Method == http.MethodGet {
+			httpMethodGetHandler(w, r, false) // Handle SSE connection setup
+		} else {
+			log.Printf("Method Not Allowed: %s", r.Method)
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		}
+	}
+
+	postHandler := func(w http.ResponseWriter, r *http.Request) {
+		// CORS Headers (Apply to all relevant requests)
+		w.Header().Set("Access-Control-Allow-Origin", "*") // Be more specific in production
+		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
+
+		if r.Method == http.MethodOptions {
+			log.Println("Responding to OPTIONS request")
+			w.WriteHeader(http.StatusNoContent) // Use 204 No Content for OPTIONS
+			return
+		}
+
+		if r.Method == http.MethodPost {
+			httpMethodPostHandler(w, r, toolSet, cfg, false) // Handle SSE connection setup
+		} else {
+			log.Printf("Method Not Allowed: %s", r.Method)
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		}
+	}
+
+	streamableHandler := func(w http.ResponseWriter, r *http.Request) {
 		// CORS Headers (Apply to all relevant requests)
 		w.Header().Set("Access-Control-Allow-Origin", "*") // Be more specific in production
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With, X-Connection-ID")
-		w.Header().Set("Access-Control-Expose-Headers", "X-Connection-ID")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
 
 		if r.Method == http.MethodOptions {
 			log.Println("Responding to OPTIONS request")
@@ -115,9 +154,9 @@ func ServeMCP(addr string, toolSet *mcp.ToolSet, cfg *config.Config) error {
 		}
 
 		if r.Method == http.MethodGet {
-			httpMethodGetHandler(w, r) // Handle SSE connection setup
+			httpMethodGetHandler(w, r, true) // Handle SSE connection setup
 		} else if r.Method == http.MethodPost {
-			httpMethodPostHandler(w, r, toolSet, cfg) // Pass the cfg object here
+			httpMethodPostHandler(w, r, toolSet, cfg, true)
 		} else {
 			log.Printf("Method Not Allowed: %s", r.Method)
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -126,16 +165,34 @@ func ServeMCP(addr string, toolSet *mcp.ToolSet, cfg *config.Config) error {
 
 	// Setup server mux
 	mux := http.NewServeMux()
-	mux.HandleFunc("/mcp", mcpHandler) // Single endpoint for GET/POST/OPTIONS
+	// See: https://www.claudemcp.com/specification
+	mux.HandleFunc("/mcp", sseHandler)                 // Single endpoint for GET/POST/OPTIONS
+	mux.HandleFunc("/mcp/{connectionId}", postHandler) // Specific endpoint for HTTP+SSE requests
+
+	// See: https://blog.christianposta.com/ai/understanding-mcp-recent-change-around-http-sse/
+	mux.HandleFunc("/messages", streamableHandler)
 
 	log.Printf("MCP server listening on %s/mcp", addr)
 	return http.ListenAndServe(addr, mux)
 }
 
-// httpMethodGetHandler handles the initial GET request to establish the SSE connection.
-func httpMethodGetHandler(w http.ResponseWriter, r *http.Request) {
+// httpMethodSSEHandler handles the initial GET request to establish the SSE connection.
+func httpMethodGetHandler(w http.ResponseWriter, r *http.Request, streamable bool) {
+	log.Printf("Inbound SSE connection received to %s, type %s.", r.Host, r.Method)
 	connectionID := uuid.New().String()
-	log.Printf("SSE client connecting: %s (Assigning ID: %s)", r.RemoteAddr, connectionID)
+
+	// --- Setup connection via connection manager ---
+	conn := mcpConnectionManager.NewConnection(connectionID)
+	log.Printf("Registered connection %s. Active connections: %d", connectionID, mcpConnectionManager.GetConnectionCount())
+
+	// --- Cleanup function ---
+	cleanup := func() {
+		mcpConnectionManager.RemoveConnection(connectionID)
+		log.Printf("Removed connection %s. Active connections: %d", connectionID, mcpConnectionManager.GetConnectionCount())
+	}
+	defer cleanup()
+
+	log.Printf("SSE client connecting: %s (Using ID: %s)", r.RemoteAddr, connectionID)
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -149,7 +206,6 @@ func httpMethodGetHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	// CORS headers are set in the main handler
-	w.Header().Set("X-Connection-ID", connectionID)
 	w.Header().Set("X-Accel-Buffering", "no") // Useful for proxies like Nginx
 	w.WriteHeader(http.StatusOK)              // Write headers and status code
 	flusher.Flush()                           // Ensure headers are sent immediately
@@ -163,46 +219,13 @@ func httpMethodGetHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Sent :ok preamble to %s (ID: %s)", r.RemoteAddr, connectionID)
 
 	// --- Send initial SSE events --- (endpoint, mcp-ready)
-	endpointURL := fmt.Sprintf("/mcp?sessionId=%s", connectionID) // Assuming /mcp is the mount path
+	endpointURL := fmt.Sprintf("http://%s/mcp/%s", r.Host, connectionID)
 	if err := writeSSEEvent(w, "endpoint", endpointURL); err != nil {
 		log.Printf("Error sending SSE endpoint event to %s (ID: %s): %v", r.RemoteAddr, connectionID, err)
 		return
 	}
 	flusher.Flush()
 	log.Printf("Sent endpoint event to %s (ID: %s)", r.RemoteAddr, connectionID)
-
-	readyMsg := jsonRPCRequest{ // Use request struct for notification format
-		Jsonrpc: "2.0",
-		Method:  "mcp-ready",
-		Params: map[string]interface{}{ // Put data in params
-			"connectionId": connectionID,
-			"status":       "connected",
-			"protocol":     "2.0",
-		},
-	}
-	if err := writeSSEEvent(w, "message", readyMsg); err != nil {
-		log.Printf("Error sending SSE mcp-ready event to %s (ID: %s): %v", r.RemoteAddr, connectionID, err)
-		return
-	}
-	flusher.Flush()
-	log.Printf("Sent mcp-ready event to %s (ID: %s)", r.RemoteAddr, connectionID)
-
-	// --- Setup message channel and store connection ---
-	msgChan := make(chan jsonRPCResponse, messageChannelBufferSize) // Channel for responses
-	connMutex.Lock()
-	activeConnections[connectionID] = msgChan
-	connMutex.Unlock()
-	log.Printf("Registered channel for connection %s. Active connections: %d", connectionID, len(activeConnections))
-
-	// --- Cleanup function ---
-	cleanup := func() {
-		connMutex.Lock()
-		delete(activeConnections, connectionID)
-		connMutex.Unlock()
-		close(msgChan) // Close channel when connection ends
-		log.Printf("Removed connection %s. Active connections: %d", connectionID, len(activeConnections))
-	}
-	defer cleanup()
 
 	// --- Goroutine to write messages from channel to SSE stream ---
 	ctx, cancel := context.WithCancel(r.Context())
@@ -215,7 +238,7 @@ func httpMethodGetHandler(w http.ResponseWriter, r *http.Request) {
 			select {
 			case <-ctx.Done():
 				return // Exit if main context is cancelled
-			case resp, ok := <-msgChan:
+			case resp, ok := <-conn.Channel:
 				if !ok {
 					log.Printf("[SSE Writer %s] Message channel closed.", connectionID)
 					return // Exit if channel is closed
@@ -242,16 +265,9 @@ func httpMethodGetHandler(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[SSE %s] Context done. Exiting keep-alive loop.", connectionID)
 			return // Exit loop if context cancelled (client disconnect or write error)
 		case <-keepAliveTicker.C:
-			// Send JSON-RPC ping notification instead of SSE comment
-			pingMsg := jsonRPCRequest{ // Use request struct for notification format
-				Jsonrpc: "2.0",
-				Method:  "ping",
-				Params: map[string]interface{}{ // Include timestamp like gin-mcp
-					"timestamp": time.Now().Unix(),
-				},
-			}
-			if err := writeSSEEvent(w, "message", pingMsg); err != nil {
-				log.Printf("[SSE %s] Error sending ping notification: %v. Closing connection.", connectionID, err)
+			// Send SSE keep-alive comment instead of JSON-RPC ping during initialization
+			if _, err := fmt.Fprintf(w, ": keep-alive\n\n"); err != nil {
+				log.Printf("[SSE %s] Error sending keep-alive comment: %v. Closing connection.", connectionID, err)
 				cancel() // Signal writer goroutine and exit
 				return
 			}
@@ -297,30 +313,34 @@ func writeSSEEvent(w http.ResponseWriter, eventName string, data interface{}) er
 }
 
 // httpMethodPostHandler handles incoming POST requests containing MCP messages.
-func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, toolSet *mcp.ToolSet, cfg *config.Config) {
-	// --- Original Logic (Restored) ---
-	connID := r.Header.Get("X-Connection-ID") // Try header first
-	if connID == "" {
-		connID = r.URL.Query().Get("sessionId") // Fallback to query parameter
-		log.Printf("X-Connection-ID header missing, checking sessionId query param: found='%s'", connID)
-	}
+func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, toolSet *mcp.ToolSet, cfg *config.Config, stateless bool) {
+	log.Printf("Inbound Post connection received to %s, type %s.", r.Host, r.Method)
 
-	if connID == "" {
-		log.Println("Error: POST request received without X-Connection-ID header or sessionId query parameter")
-		http.Error(w, "Missing X-Connection-ID header or sessionId query parameter", http.StatusBadRequest)
-		return
-	}
+	w.Header().Add("Content-type", "application/json")
 
-	// Find the corresponding message channel for this connection
-	connMutex.RLock()
-	msgChan, isActive := activeConnections[connID]
-	connMutex.RUnlock()
+	var conn *Connection
+	var connID string
 
-	if !isActive {
-		log.Printf("Error: POST request received for inactive/unknown connection ID: %s", connID)
-		// Still send sync error here, as we don't have a channel
-		tryWriteHTTPError(w, http.StatusNotFound, "Invalid or expired connection ID")
-		return
+	if stateless {
+		connID = "stateless"
+		conn = &Connection{}
+		// sessionID = r.Header.Get("Mcp-Session-Id")
+	} else {
+		connID = r.PathValue("connectionId")
+
+		if connID == "" {
+			log.Println("Error: POST request received without url containing current connection ID")
+			http.Error(w, "Missing current connection ID in url", http.StatusBadRequest)
+			return
+		}
+
+		// Find the corresponding connection
+		conn = mcpConnectionManager.GetConnection(connID)
+		if conn == nil {
+			log.Println("Error: could not find active connection matching connection ID")
+			http.Error(w, "No active connection matching connection ID", http.StatusBadRequest)
+			return
+		}
 	}
 
 	bodyBytes, err := io.ReadAll(r.Body)
@@ -344,15 +364,20 @@ func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, toolSet *mcp.
 		}
 		// Attempt to send via SSE channel
 		select {
-		case msgChan <- errResp:
+		case conn.Channel <- errResp:
 			log.Printf("Queued read error response (ID: %v) for %s onto SSE channel (as Result)", errResp.ID, connID)
 			// Send HTTP 202 Accepted back to the POST request
 			w.WriteHeader(http.StatusAccepted)
 			fmt.Fprintln(w, "Request accepted (with parse error), response will be sent via SSE.")
 		default:
-			log.Printf("Error: Failed to queue read error response (ID: %v) for %s - SSE channel likely full or closed.", errResp.ID, connID)
-			// Send an error back on the POST request if channel fails
-			tryWriteHTTPError(w, http.StatusInternalServerError, "Failed to queue error response for SSE channel")
+			if stateless {
+				errOut, _ := json.Marshal(errResp)
+				w.Write(errOut)
+			} else {
+				log.Printf("Error: Failed to queue read error response (ID: %v) for %s - SSE channel likely full or closed.", errResp.ID, connID)
+				// Send an error back on the POST request if channel fails
+				tryWriteHTTPError(w, http.StatusInternalServerError, "Failed to queue error response for SSE channel")
+			}
 		}
 		return // Stop processing
 	}
@@ -386,16 +411,21 @@ func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, toolSet *mcp.
 
 		// Attempt to send via SSE channel
 		select {
-		case msgChan <- errResp:
+		case conn.Channel <- errResp:
 			log.Printf("Queued decode error response (ID: %v) for %s onto SSE channel", errResp.ID, connID)
 			// Send HTTP 202 Accepted back to the POST request
 			w.WriteHeader(http.StatusAccepted)
 			// Use a specific message for decode errors
 			fmt.Fprintln(w, "Request accepted (with decode error), response will be sent via SSE.")
 		default:
-			log.Printf("Error: Failed to queue decode error response (ID: %v) for %s - SSE channel likely full or closed.", errResp.ID, connID)
-			// Send an error back on the POST request if channel fails
-			tryWriteHTTPError(w, http.StatusInternalServerError, "Failed to queue error response for SSE channel")
+			if stateless {
+				errOut, _ := json.Marshal(errResp)
+				w.Write(errOut)
+			} else {
+				log.Printf("Error: Failed to queue decode error response (ID: %v) for %s - SSE channel likely full or closed.", errResp.ID, connID)
+				// Send an error back on the POST request if channel fails
+				tryWriteHTTPError(w, http.StatusInternalServerError, "Failed to queue error response for SSE channel")
+			}
 		}
 		return // Stop processing
 	}
@@ -420,39 +450,71 @@ func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, toolSet *mcp.
 	} else {
 		// --- Process the valid request ---
 		log.Printf("Processing JSON-RPC message for %s: Method=%s, ID=%v", connID, req.Method, reqID)
+
+		// Check connection state and validate method based on state
 		switch req.Method {
 		case "initialize":
-			incomingInitializeJSON, _ := json.Marshal(req)
-			log.Printf("DEBUG: Handling 'initialize' for %s. Incoming request: %s", connID, string(incomingInitializeJSON))
-			respToSend = handleInitializeJSONRPC(connID, &req)
-			outgoingInitializeJSON, _ := json.Marshal(respToSend)
-			log.Printf("DEBUG: Prepared 'initialize' response for %s. Outgoing response: %s", connID, string(outgoingInitializeJSON))
-		case "notifications/initialized":
-			log.Printf("Received 'notifications/initialized' notification for %s. Ignoring.", connID)
-			w.WriteHeader(http.StatusAccepted)
-			fmt.Fprintln(w, "Notification received.")
-			return // Return early, do not send anything on SSE channel
-		case "tools/list":
-			respToSend = handleToolsListJSONRPC(connID, &req, toolSet)
-		case "tools/call":
-			respToSend = handleToolCallJSONRPC(connID, &req, toolSet, cfg)
+			if conn.State != StateConnected {
+				log.Printf("Initialize request rejected for %s - wrong state: %s", connID, conn.State)
+				respToSend = createJSONRPCError(reqID, -32600, "Invalid Request: already initialized or wrong state", nil)
+			} else {
+				incomingInitializeJSON, _ := json.Marshal(req)
+				log.Printf("DEBUG: Handling 'initialize' for %s. Incoming request: %s", connID, string(incomingInitializeJSON))
+				respToSend = handleInitializeJSONRPC(connID, &req)
+				// Update state to Initializing after handling
+				mcpConnectionManager.UpdateState(connID, StateInitializing)
+				outgoingInitializeJSON, _ := json.Marshal(respToSend)
+				log.Printf("DEBUG: Prepared 'initialize' response for %s. Outgoing response: %s", connID, string(outgoingInitializeJSON))
+			}
+		case "initialized":
+			if conn.State != StateInitializing {
+				log.Printf("Initialized notification rejected for %s - wrong state: %s", connID, conn.State)
+				respToSend = createJSONRPCError(reqID, -32600, "Invalid Request: not in initialization phase", nil)
+			} else {
+				log.Printf("Received 'initialized' notification for %s. Updating state to Ready.", connID)
+				mcpConnectionManager.UpdateState(connID, StateReady)
+				w.WriteHeader(http.StatusAccepted)
+				fmt.Fprintln(w, "Notification received.")
+				if !stateless {
+					return // Return early, do not send anything on SSE channel
+				}
+			}
 		default:
-			log.Printf("Received unknown JSON-RPC method '%s' for %s", req.Method, connID)
-			respToSend = createJSONRPCError(reqID, -32601, fmt.Sprintf("Method not found: %s", req.Method), nil)
+			// All other methods require Ready state
+			if conn.State != StateReady {
+				log.Printf("Operation '%s' rejected for %s - not ready (state: %s)", req.Method, connID, conn.State)
+				respToSend = createJSONRPCError(reqID, -32600, "Invalid Request: not ready for operations", nil)
+			} else {
+				// Process normal operations
+				switch req.Method {
+				case "tools/list":
+					respToSend = handleToolsListJSONRPC(connID, &req, toolSet)
+				case "tools/call":
+					respToSend = handleToolCallJSONRPC(connID, &req, toolSet, cfg)
+				default:
+					log.Printf("Received unknown JSON-RPC method '%s' for %s", req.Method, connID)
+					respToSend = createJSONRPCError(reqID, -32601, fmt.Sprintf("Method not found: %s", req.Method), nil)
+				}
+			}
 		}
 	}
 
-	// --- Send response ASYNCHRONOUSLY via SSE channel (unless handled earlier) ---
+	// --- Send response ---
 	select {
-	case msgChan <- respToSend:
+	case conn.Channel <- respToSend:
 		log.Printf("Queued response (ID: %v) for %s onto SSE channel", respToSend.ID, connID)
 		// Send HTTP 202 Accepted back to the POST request
 		w.WriteHeader(http.StatusAccepted)
 		// Use the standard message for successfully queued responses
 		fmt.Fprintln(w, "Request accepted, response will be sent via SSE.")
 	default:
-		log.Printf("Error: Failed to queue response (ID: %v) for %s - SSE channel likely full or closed.", respToSend.ID, connID)
-		http.Error(w, "Failed to queue response for SSE channel", http.StatusInternalServerError)
+		if stateless {
+			errOut, _ := json.Marshal(respToSend)
+			w.Write(errOut)
+		} else {
+			log.Printf("Error: Failed to queue response (ID: %v) for %s - SSE channel likely full or closed.", respToSend.ID, connID)
+			http.Error(w, "Failed to queue response for SSE channel", http.StatusInternalServerError)
+		}
 	}
 }
 

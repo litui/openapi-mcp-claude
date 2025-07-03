@@ -68,23 +68,14 @@ func createTestToolSetForCall() *mcp.ToolSet {
 	}
 }
 
-// Helper to safely manage activeConnections for tests
-func setupTestConnection(connID string) chan jsonRPCResponse {
-	msgChan := make(chan jsonRPCResponse, 1) // Buffer of 1 sufficient for most tests
-	connMutex.Lock()
-	activeConnections[connID] = msgChan
-	connMutex.Unlock()
-	return msgChan
+// Helper to safely manage connections for tests using the MCP connection manager
+func setupTestConnection(connID string) (*Connection, chan jsonRPCResponse) {
+	conn := mcpConnectionManager.NewConnection(connID)
+	return conn, conn.Channel
 }
 
 func cleanupTestConnection(connID string) {
-	connMutex.Lock()
-	msgChan, exists := activeConnections[connID]
-	if exists {
-		delete(activeConnections, connID)
-		close(msgChan)
-	}
-	connMutex.Unlock()
+	mcpConnectionManager.RemoveConnection(connID)
 }
 
 // --- End Re-added Helper Functions ---
@@ -104,7 +95,56 @@ func TestHttpMethodPostHandler(t *testing.T) {
 		checkAsyncResponse   func(t *testing.T, resp jsonRPCResponse) // Function to check async response
 		mockBackend          http.HandlerFunc                         // Optional mock backend for tool calls
 		setupChannelDirectly func(connID string) chan jsonRPCResponse // Optional: For specific channel setups
+		preTestSetup         func(connID string)                      // Optional: Setup connection state before test
 	}{
+		{
+			name: "Initialize Request - Double Initialize Rejected",
+			requestBodyFn: func(connID string) string {
+				return `{"jsonrpc": "2.0", "method": "initialize", "id": "double-init"}`
+			},
+			expectedSyncStatus: http.StatusAccepted,
+			expectedSyncBody:   "Request accepted, response will be sent via SSE.\n",
+			preTestSetup: func(connID string) {
+				// Set connection to Initializing state to simulate already initialized
+				mcpConnectionManager.UpdateState(connID, StateInitializing)
+			},
+			checkAsyncResponse: func(t *testing.T, resp jsonRPCResponse) {
+				assert.Equal(t, "double-init", resp.ID)
+				require.NotNil(t, resp.Error)
+				assert.Equal(t, -32600, resp.Error.Code)
+				assert.Contains(t, resp.Error.Message, "already initialized or wrong state")
+			},
+		},
+		{
+			name: "Initialized Notification - Wrong State Rejected",
+			requestBodyFn: func(connID string) string {
+				return `{"jsonrpc": "2.0", "method": "initialized", "id": "wrong-state-init"}`
+			},
+			expectedSyncStatus: http.StatusAccepted,
+			expectedSyncBody:   "Request accepted, response will be sent via SSE.\n",
+			// preTestSetup: Connection starts in Connected state by default
+			checkAsyncResponse: func(t *testing.T, resp jsonRPCResponse) {
+				assert.Equal(t, "wrong-state-init", resp.ID)
+				require.NotNil(t, resp.Error)
+				assert.Equal(t, -32600, resp.Error.Code)
+				assert.Contains(t, resp.Error.Message, "not in initialization phase")
+			},
+		},
+		{
+			name: "Tools List Before Initialization - Rejected",
+			requestBodyFn: func(connID string) string {
+				return `{"jsonrpc": "2.0", "method": "tools/list", "id": "tools-too-early"}`
+			},
+			expectedSyncStatus: http.StatusAccepted,
+			expectedSyncBody:   "Request accepted, response will be sent via SSE.\n",
+			// preTestSetup: Connection starts in Connected state by default
+			checkAsyncResponse: func(t *testing.T, resp jsonRPCResponse) {
+				assert.Equal(t, "tools-too-early", resp.ID)
+				require.NotNil(t, resp.Error)
+				assert.Equal(t, -32600, resp.Error.Code)
+				assert.Contains(t, resp.Error.Message, "not ready for operations")
+			},
+		},
 		{
 			name: "Valid Initialize Request",
 			requestBodyFn: func(connID string) string {
@@ -137,6 +177,10 @@ func TestHttpMethodPostHandler(t *testing.T) {
 			},
 			expectedSyncStatus: http.StatusAccepted,
 			expectedSyncBody:   "Request accepted, response will be sent via SSE.\n",
+			preTestSetup: func(connID string) {
+				// Set connection to Ready state so tools/list is allowed
+				mcpConnectionManager.UpdateState(connID, StateReady)
+			},
 			checkAsyncResponse: func(t *testing.T, resp jsonRPCResponse) {
 				assert.Equal(t, "list-post-1", resp.ID)
 				assert.Nil(t, resp.Error)
@@ -160,6 +204,10 @@ func TestHttpMethodPostHandler(t *testing.T) {
 			},
 			expectedSyncStatus: http.StatusAccepted,
 			expectedSyncBody:   "Request accepted, response will be sent via SSE.\n",
+			preTestSetup: func(connID string) {
+				// Set connection to Ready state so tools/call is allowed
+				mcpConnectionManager.UpdateState(connID, StateReady)
+			},
 			checkAsyncResponse: func(t *testing.T, resp jsonRPCResponse) {
 				assert.Equal(t, "call-post-1", resp.ID)
 				assert.Nil(t, resp.Error)
@@ -186,6 +234,10 @@ func TestHttpMethodPostHandler(t *testing.T) {
 			},
 			expectedSyncStatus: http.StatusAccepted,
 			expectedSyncBody:   "Request accepted, response will be sent via SSE.\n",
+			preTestSetup: func(connID string) {
+				// Set connection to Ready state so tools/call is allowed
+				mcpConnectionManager.UpdateState(connID, StateReady)
+			},
 			checkAsyncResponse: func(t *testing.T, resp jsonRPCResponse) {
 				assert.Equal(t, "call-post-err-1", resp.ID)
 				assert.Nil(t, resp.Error)
@@ -238,6 +290,10 @@ func TestHttpMethodPostHandler(t *testing.T) {
 			},
 			expectedSyncStatus: http.StatusAccepted,
 			expectedSyncBody:   "Request accepted, response will be sent via SSE.\n",
+			preTestSetup: func(connID string) {
+				// Set connection to Ready state so unknown method check is reached
+				mcpConnectionManager.UpdateState(connID, StateReady)
+			},
 			checkAsyncResponse: func(t *testing.T, resp jsonRPCResponse) {
 				assert.Equal(t, "rpc-err-2", resp.ID)
 				require.NotNil(t, resp.Error)
@@ -274,13 +330,16 @@ func TestHttpMethodPostHandler(t *testing.T) {
 			expectedSyncStatus: http.StatusInternalServerError,               // Expect 500 when channel is blocked
 			expectedSyncBody:   "Failed to queue response for SSE channel\n", // Specific error message expected
 			setupChannelDirectly: func(connID string) chan jsonRPCResponse {
-				// Create a NON-BUFFERED channel to simulate blocking/full channel
-				msgChan := make(chan jsonRPCResponse) // No buffer size!
-				connMutex.Lock()
-				activeConnections[connID] = msgChan
-				connMutex.Unlock()
+				// Create a connection with NON-BUFFERED channel to simulate blocking/full channel
+				conn := &Connection{
+					ID:      connID,
+					State:   StateConnected,
+					Channel: make(chan jsonRPCResponse), // No buffer size!
+				}
+				// Manually add to MCP connection manager (accessing private field for test)
+				mcpConnectionManager.connections[connID] = conn
 				// Important: Do NOT start a reader for this channel
-				return msgChan
+				return conn.Channel
 			},
 			checkAsyncResponse: nil, // No async response should be successfully sent
 		},
@@ -300,9 +359,14 @@ func TestHttpMethodPostHandler(t *testing.T) {
 				msgChan = tc.setupChannelDirectly(connID)
 			} else {
 				// Default setup using the helper with buffered channel
-				msgChan = setupTestConnection(connID)
+				_, msgChan = setupTestConnection(connID)
 			}
 			defer cleanupTestConnection(connID) // Ensure cleanup after test
+
+			// Run pre-test setup if provided
+			if tc.preTestSetup != nil {
+				tc.preTestSetup(connID)
+			}
 
 			if tc.mockBackend != nil {
 				backendServer = httptest.NewServer(tc.mockBackend)
@@ -360,28 +424,19 @@ func TestHttpMethodPostHandler(t *testing.T) {
 
 func TestHttpMethodGetHandler(t *testing.T) {
 	// --- Setup ---
-	// Reset global state for this test
-	connMutex.Lock()
-	originalConnections := activeConnections
-	activeConnections = make(map[string]chan jsonRPCResponse)
-	connMutex.Unlock()
+	// Reset connection manager for this test
+	originalManager := mcpConnectionManager
+	mcpConnectionManager = NewConnectionManager()
 
 	req, err := http.NewRequest("GET", "/mcp", nil)
 	require.NoError(t, err, "Failed to create request")
+	req.Host = "example.com" // Set host for proper absolute URI generation
 
 	rr := httptest.NewRecorder()
 
 	// Ensure cleanup happens regardless of test outcome
 	defer func() {
-		connMutex.Lock()
-		// Clean up any connections potentially left by the test
-		for id, ch := range activeConnections {
-			close(ch)
-			delete(activeConnections, id)
-			log.Printf("[DEFER Cleanup] Closed channel and removed connection %s", id)
-		}
-		activeConnections = originalConnections // Restore the original map
-		connMutex.Unlock()
+		mcpConnectionManager = originalManager // Restore the original manager
 	}()
 
 	// --- Execute Handler (in a goroutine as it blocks waiting for context) ---
@@ -397,7 +452,7 @@ func TestHttpMethodGetHandler(t *testing.T) {
 		// For the test, we just call cancel() after a short delay
 		// to simulate the connection ending gracefully.
 		time.AfterFunc(100*time.Millisecond, cancel) // Allow handler to start and write initial data
-		httpMethodGetHandler(rr, req)
+		httpMethodSSEHandler(rr, req)
 	}()
 
 	// Wait for the handler goroutine to finish.
@@ -417,20 +472,17 @@ func TestHttpMethodGetHandler(t *testing.T) {
 	assert.NotEmpty(t, connID, "X-Connection-ID header should be set")
 
 	// Check connection was registered and then cleaned up
-	connMutex.RLock()
-	_, exists := originalConnections[connID] // Check original map after cleanup
-	connMutex.RUnlock()
-	assert.False(t, exists, "Connection ID should be removed from map after handler exits")
+	conn := mcpConnectionManager.GetConnection(connID)
+	assert.Nil(t, conn, "Connection ID should be removed from manager after handler exits")
 
 	// Check initial body content is present
 	bodyContent := rr.Body.String()
 	assert.Contains(t, bodyContent, ":ok\n\n", "Body should contain :ok preamble")
-	// Construct the expected endpoint data string accurately
-	expectedEndpointData := "data: /mcp?sessionId=" + connID + "\n\n"
-	assert.Contains(t, bodyContent, "event: endpoint\n"+expectedEndpointData, "Body should contain endpoint event")
-	assert.Contains(t, bodyContent, "event: message\ndata: {", "Body should contain start of a message event (e.g., mcp-ready)")
-	// Check if connectionId is present in the ready message (adjust based on actual JSON structure)
-	assert.Contains(t, bodyContent, `"connectionId":"`+connID+`"`, "Body should contain mcp-ready event with correct connection ID")
+	// Construct the expected endpoint data string with absolute URI
+	expectedEndpointData := "data: http://example.com/mcp\n\n"
+	assert.Contains(t, bodyContent, "event: endpoint\n"+expectedEndpointData, "Body should contain endpoint event with absolute URI")
+	// Should NOT contain mcp-ready events anymore
+	assert.NotContains(t, bodyContent, "mcp-ready", "Body should NOT contain mcp-ready events")
 
 	// The explicit cleanupTestConnection call is not needed because the handler's defer and the test's defer handle it.
 }
@@ -706,11 +758,11 @@ func TestWriteSSEEvent(t *testing.T) {
 			eventName: "message",
 			data: jsonRPCRequest{
 				Jsonrpc: "2.0",
-				Method:  "mcp-ready",
-				Params:  map[string]interface{}{"connectionId": "abc"},
+				Method:  "ping",
+				Params:  map[string]interface{}{"timestamp": 123456},
 			},
 			// Note: JSON marshaling order isn't guaranteed, so use JSONEq or check fields
-			expectedOut: "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"mcp-ready\",\"params\":{\"connectionId\":\"abc\"}}\n\n",
+			expectedOut: "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"params\":{\"timestamp\":123456}}\n\n",
 			expectError: false,
 		},
 		{
@@ -872,7 +924,6 @@ func (m *sseMockResponseWriter) Write(p []byte) (int, error) {
 	// Check if write count triggers failure
 	if m.failAfterNWrites >= 0 && m.writesMade >= m.failAfterNWrites {
 		m.forceError = fmt.Errorf("forced write error after %d writes", m.failAfterNWrites)
-		log.Printf("DEBUG: sseMockResponseWriter triggering error: %v", m.forceError) // Debug log
 		return 0, m.forceError
 	}
 
@@ -945,7 +996,7 @@ func TestHttpMethodGetHandler_WriteErrors(t *testing.T) {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				httpMethodGetHandler(mockWriter, req)
+				httpMethodSSEHandler(mockWriter, req)
 			}()
 
 			// Wait for the handler goroutine to finish or timeout
@@ -961,10 +1012,8 @@ func TestHttpMethodGetHandler_WriteErrors(t *testing.T) {
 
 			// Assert connection removal
 			if tc.expectConnRemoved && connID != "" {
-				connMutex.RLock()
-				_, exists := activeConnections[connID]
-				connMutex.RUnlock()
-				assert.False(t, exists, "Connection %s should have been removed from activeConnections after write error", connID)
+				conn := mcpConnectionManager.GetConnection(connID)
+				assert.Nil(t, conn, "Connection %s should have been removed from connection manager after write error", connID)
 			} else if tc.expectConnRemoved && connID == "" {
 				t.Log("Cannot assert connection removal as ConnID was not captured before error")
 			}
@@ -974,46 +1023,40 @@ func TestHttpMethodGetHandler_WriteErrors(t *testing.T) {
 
 func TestHttpMethodGetHandler_GoroutineErrors(t *testing.T) {
 	t.Run("Error_on_Message_Write", func(t *testing.T) {
-		// Estimate writes before first message: :ok(1), endpoint(1), ready(1) = 3 writes
-		// Target failure on the 4th write (first write of the actual message event line)
+		// Actual writes before first message: :ok(1), endpoint(1) = 2 writes
+		// Target failure on the 3rd write (the actual message event)
 		mockWriter := newSseMockResponseWriter()
-		mockWriter.failAfterNWrites = 4 // Fail on the 4th write overall
+		mockWriter.failAfterNWrites = 3 // Fail on the 3rd write (the message)
 
 		req := httptest.NewRequest(http.MethodGet, "/mcp", nil)
 		var connID string
 		var msgChan chan jsonRPCResponse
 
 		// Clean connections before test
-		connMutex.Lock()
-		activeConnections = make(map[string]chan jsonRPCResponse)
-		connMutex.Unlock()
+		originalManager := mcpConnectionManager
+		mcpConnectionManager = NewConnectionManager()
 		defer func() {
-			// Clean up after test, ensure channel is closed if exists
-			connMutex.Lock()
-			if msgChan != nil {
-				// Only delete from map, handler is responsible for closing channel
-				delete(activeConnections, connID)
-			}
-			activeConnections = make(map[string]chan jsonRPCResponse) // Reset for other tests
-			connMutex.Unlock()
+			// Clean up after test
+			mcpConnectionManager = originalManager // Reset for other tests
 		}()
 
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			httpMethodGetHandler(mockWriter, req)
+			httpMethodSSEHandler(mockWriter, req)
 			log.Println("DEBUG: httpMethodGetHandler goroutine exited")
 		}()
 
 		// Wait for the connection to be established
 		assert.Eventually(t, func() bool {
-			connMutex.RLock()
-			defer connMutex.RUnlock()
-			for id, ch := range activeConnections {
-				connID = id
-				msgChan = ch
-				log.Printf("DEBUG: Connection established: %s", connID)
-				return true
+			if mcpConnectionManager.GetConnectionCount() > 0 {
+				// Get the first connection from the manager
+				for id, conn := range mcpConnectionManager.connections {
+					connID = id
+					msgChan = conn.Channel
+					log.Printf("DEBUG: Connection established: %s", connID)
+					return true
+				}
 			}
 			return false
 		}, 200*time.Millisecond, 20*time.Millisecond, "Connection not established in time")
@@ -1041,10 +1084,8 @@ func TestHttpMethodGetHandler_GoroutineErrors(t *testing.T) {
 		}
 
 		// Assert connection removal
-		connMutex.RLock()
-		_, exists := activeConnections[connID]
-		connMutex.RUnlock()
-		assert.False(t, exists, "Connection %s should have been removed after message write error", connID)
+		conn := mcpConnectionManager.GetConnection(connID)
+		assert.Nil(t, conn, "Connection %s should have been removed after message write error", connID)
 	})
 
 	// TODO: Add sub-test for Error_on_Ping_Write

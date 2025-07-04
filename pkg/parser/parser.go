@@ -226,7 +226,7 @@ func generateToolSetV3(doc *openapi3.T, cfg *config.Config) (*mcp.ToolSet, error
 			}
 
 			// Prepend note about API key handling
-			finalToolDesc := "Note: The API key is handled by the server, no need to provide it. " + toolDesc
+			finalToolDesc := "Note: The API key is supplied by the server, no need to provide it. " + toolDesc
 
 			tool := mcp.Tool{
 				Name:        toolName,
@@ -528,7 +528,7 @@ func generateToolSetV2(doc *spec.Swagger, cfg *config.Config) (*mcp.ToolSet, err
 			}
 
 			// Prepend note about API key handling
-			finalToolDesc := "Note: The API key is handled by the server, no need to provide it. " + toolDesc
+			finalToolDesc := "Note: The API key is supplied by the server, no need to provide it. " + toolDesc
 
 			tool := mcp.Tool{
 				Name:        toolName,

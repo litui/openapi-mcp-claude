@@ -145,7 +145,8 @@ func ServeMCP(addr string, toolSet *mcp.ToolSet, cfg *config.Config) error {
 		// CORS Headers (Apply to all relevant requests)
 		w.Header().Set("Access-Control-Allow-Origin", "*") // Be more specific in production
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With, Mcp-Session-Id")
+		w.Header().Set("Access-Control-Expose-Headers", "Mcp-Session-Id")
 
 		if r.Method == http.MethodOptions {
 			log.Println("Responding to OPTIONS request")
@@ -157,6 +158,17 @@ func ServeMCP(addr string, toolSet *mcp.ToolSet, cfg *config.Config) error {
 			httpMethodGetHandler(w, r, true) // Handle SSE connection setup
 		} else if r.Method == http.MethodPost {
 			httpMethodPostHandler(w, r, toolSet, cfg, true)
+			connID := r.Header.Get("Mcp-Session-Id")
+			if connID != "" {
+				conn := mcpConnectionManager.GetConnection(connID)
+				for i := 0; i < len(conn.Channel); i++ {
+					output, ok := <-conn.Channel
+					if ok {
+						outJson, _ := json.Marshal(output)
+						w.Write(outJson)
+					}
+				}
+			}
 		} else {
 			log.Printf("Method Not Allowed: %s", r.Method)
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -313,7 +325,7 @@ func writeSSEEvent(w http.ResponseWriter, eventName string, data interface{}) er
 }
 
 // httpMethodPostHandler handles incoming POST requests containing MCP messages.
-func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, toolSet *mcp.ToolSet, cfg *config.Config, stateless bool) {
+func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, toolSet *mcp.ToolSet, cfg *config.Config, standalone bool) {
 	log.Printf("Inbound Post connection received to %s, type %s.", r.Host, r.Method)
 
 	w.Header().Add("Content-type", "application/json")
@@ -321,10 +333,14 @@ func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, toolSet *mcp.
 	var conn *Connection
 	var connID string
 
-	if stateless {
-		connID = "stateless"
-		conn = &Connection{}
-		// sessionID = r.Header.Get("Mcp-Session-Id")
+	if standalone {
+		connID = r.Header.Get("Mcp-Session-Id")
+		if connID != "" {
+			conn = mcpConnectionManager.GetConnection(connID)
+			if conn == nil {
+				conn = mcpConnectionManager.NewConnection(connID)
+			}
+		}
 	} else {
 		connID = r.PathValue("connectionId")
 
@@ -366,16 +382,15 @@ func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, toolSet *mcp.
 		select {
 		case conn.Channel <- errResp:
 			log.Printf("Queued read error response (ID: %v) for %s onto SSE channel (as Result)", errResp.ID, connID)
-			// Send HTTP 202 Accepted back to the POST request
-			w.WriteHeader(http.StatusAccepted)
-			fmt.Fprintln(w, "Request accepted (with parse error), response will be sent via SSE.")
+			if !standalone {
+				// Send HTTP 202 Accepted back to the POST request
+				w.WriteHeader(http.StatusAccepted)
+				fmt.Fprintln(w, "Request accepted (with parse error), response will be sent via SSE.")
+			}
 		default:
-			if stateless {
-				errOut, _ := json.Marshal(errResp)
-				w.Write(errOut)
-			} else {
-				log.Printf("Error: Failed to queue read error response (ID: %v) for %s - SSE channel likely full or closed.", errResp.ID, connID)
-				// Send an error back on the POST request if channel fails
+			log.Printf("Error: Failed to queue read error response (ID: %v) for %s - SSE channel likely full or closed.", errResp.ID, connID)
+			// Send an error back on the POST request if channel fails
+			if !standalone {
 				tryWriteHTTPError(w, http.StatusInternalServerError, "Failed to queue error response for SSE channel")
 			}
 		}
@@ -413,17 +428,16 @@ func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, toolSet *mcp.
 		select {
 		case conn.Channel <- errResp:
 			log.Printf("Queued decode error response (ID: %v) for %s onto SSE channel", errResp.ID, connID)
-			// Send HTTP 202 Accepted back to the POST request
-			w.WriteHeader(http.StatusAccepted)
-			// Use a specific message for decode errors
-			fmt.Fprintln(w, "Request accepted (with decode error), response will be sent via SSE.")
+			if !standalone {
+				// Send HTTP 202 Accepted back to the POST request
+				w.WriteHeader(http.StatusAccepted)
+				// Use a specific message for decode errors
+				fmt.Fprintln(w, "Request accepted (with decode error), response will be sent via SSE.")
+			}
 		default:
-			if stateless {
-				errOut, _ := json.Marshal(errResp)
-				w.Write(errOut)
-			} else {
-				log.Printf("Error: Failed to queue decode error response (ID: %v) for %s - SSE channel likely full or closed.", errResp.ID, connID)
-				// Send an error back on the POST request if channel fails
+			log.Printf("Error: Failed to queue decode error response (ID: %v) for %s - SSE channel likely full or closed.", errResp.ID, connID)
+			// Send an error back on the POST request if channel fails
+			if !standalone {
 				tryWriteHTTPError(w, http.StatusInternalServerError, "Failed to queue error response for SSE channel")
 			}
 		}
@@ -454,30 +468,30 @@ func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, toolSet *mcp.
 		// Check connection state and validate method based on state
 		switch req.Method {
 		case "initialize":
-			if conn.State != StateConnected {
-				log.Printf("Initialize request rejected for %s - wrong state: %s", connID, conn.State)
-				respToSend = createJSONRPCError(reqID, -32600, "Invalid Request: already initialized or wrong state", nil)
-			} else {
-				incomingInitializeJSON, _ := json.Marshal(req)
-				log.Printf("DEBUG: Handling 'initialize' for %s. Incoming request: %s", connID, string(incomingInitializeJSON))
-				respToSend = handleInitializeJSONRPC(connID, &req)
-				// Update state to Initializing after handling
-				mcpConnectionManager.UpdateState(connID, StateInitializing)
-				outgoingInitializeJSON, _ := json.Marshal(respToSend)
-				log.Printf("DEBUG: Prepared 'initialize' response for %s. Outgoing response: %s", connID, string(outgoingInitializeJSON))
-			}
-		case "initialized":
+			// if conn.State != StateConnected {
+			// 	log.Printf("Initialize request rejected for %s - wrong state: %s", connID, conn.State)
+			// 	respToSend = createJSONRPCError(reqID, -32600, "Invalid Request: already initialized or wrong state", nil)
+			// } else {
+			incomingInitializeJSON, _ := json.Marshal(req)
+			log.Printf("DEBUG: Handling 'initialize' for %s. Incoming request: %s", connID, string(incomingInitializeJSON))
+			respToSend = handleInitializeJSONRPC(connID, &req)
+			// Update state to Initializing after handling
+			mcpConnectionManager.UpdateState(connID, StateInitializing)
+			outgoingInitializeJSON, _ := json.Marshal(respToSend)
+			log.Printf("DEBUG: Prepared 'initialize' response for %s. Outgoing response: %s", connID, string(outgoingInitializeJSON))
+			// }
+		case "notifications/initialized":
 			if conn.State != StateInitializing {
 				log.Printf("Initialized notification rejected for %s - wrong state: %s", connID, conn.State)
 				respToSend = createJSONRPCError(reqID, -32600, "Invalid Request: not in initialization phase", nil)
 			} else {
 				log.Printf("Received 'initialized' notification for %s. Updating state to Ready.", connID)
 				mcpConnectionManager.UpdateState(connID, StateReady)
-				w.WriteHeader(http.StatusAccepted)
-				fmt.Fprintln(w, "Notification received.")
-				if !stateless {
-					return // Return early, do not send anything on SSE channel
+				if !standalone {
+					w.WriteHeader(http.StatusAccepted)
+					fmt.Fprintln(w, "Notification received.")
 				}
+				return
 			}
 		default:
 			// All other methods require Ready state
@@ -502,17 +516,16 @@ func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, toolSet *mcp.
 	// --- Send response ---
 	select {
 	case conn.Channel <- respToSend:
-		log.Printf("Queued response (ID: %v) for %s onto SSE channel", respToSend.ID, connID)
-		// Send HTTP 202 Accepted back to the POST request
-		w.WriteHeader(http.StatusAccepted)
-		// Use the standard message for successfully queued responses
-		fmt.Fprintln(w, "Request accepted, response will be sent via SSE.")
+		log.Printf("Queued response (ID: %v) for %s", respToSend.ID, connID)
+		if !standalone {
+			// Send HTTP 202 Accepted back to the POST request
+			w.WriteHeader(http.StatusAccepted)
+			// Use the standard message for successfully queued responses
+			fmt.Fprintln(w, "Request accepted, response will be sent via SSE.")
+		}
 	default:
-		if stateless {
-			errOut, _ := json.Marshal(respToSend)
-			w.Write(errOut)
-		} else {
-			log.Printf("Error: Failed to queue response (ID: %v) for %s - SSE channel likely full or closed.", respToSend.ID, connID)
+		log.Printf("Error: Failed to queue response (ID: %v) for %s - SSE channel likely full or closed.", respToSend.ID, connID)
+		if !standalone {
 			http.Error(w, "Failed to queue response for SSE channel", http.StatusInternalServerError)
 		}
 	}

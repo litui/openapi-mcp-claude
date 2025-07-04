@@ -1,8 +1,13 @@
 package server
 
 import (
+	"log"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/spf13/viper"
+	"gopkg.in/yaml.v3"
 )
 
 // ConnectionState represents the state of an MCP connection
@@ -33,23 +38,56 @@ func (s ConnectionState) String() string {
 
 // Connection represents an MCP connection
 type Connection struct {
-	ID            string
-	State         ConnectionState
-	Channel       chan jsonRPCResponse
-	InitializedAt *time.Time
-	CreatedAt     time.Time
+	ID            string               `yaml:"id"`
+	State         ConnectionState      `yaml:"state"`
+	Channel       chan jsonRPCResponse `yaml:"-"`
+	InitializedAt *time.Time           `yaml:"initializedAt"`
+	CreatedAt     time.Time            `yaml:"createdAt"`
 }
 
 // ConnectionManager manages MCP connections and their states
 type ConnectionManager struct {
-	connections map[string]*Connection
+	connections map[string]*Connection `yaml:"connection"`
 	mutex       sync.RWMutex
 }
 
 // NewConnectionManager creates a new connection manager
 func NewConnectionManager() *ConnectionManager {
+	viper.SetConfigFile("/app/spec/openapi-mcp-state.yaml")
+
+	connections := make(map[string]*Connection)
+	// cmBytes, err := yaml.Marshal(connections)
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+
+	if err := viper.ReadInConfig(); err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
+			if !viper.IsSet("connection") {
+				viper.Set("connection", connections)
+				viper.WriteConfig()
+			}
+		} else {
+			viper.Set("connection", connections)
+			viper.WriteConfig()
+		}
+	} else {
+		tempCm := viper.GetStringMap("connection")
+		for m, c := range tempCm {
+			connBytes, _ := yaml.Marshal(c)
+			log.Println(string(connBytes))
+			tCmc := &Connection{}
+			err := yaml.Unmarshal(connBytes, tCmc)
+			if err != nil {
+				log.Panic(err)
+			}
+			connections[m] = tCmc
+			connections[m].Channel = make(chan jsonRPCResponse, messageChannelBufferSize)
+		}
+	}
+
 	return &ConnectionManager{
-		connections: make(map[string]*Connection),
+		connections: connections,
 	}
 }
 
@@ -59,12 +97,15 @@ func (cm *ConnectionManager) NewConnection(id string) *Connection {
 	defer cm.mutex.Unlock()
 
 	conn := &Connection{
-		ID:        id,
+		ID:        strings.ToLower(id),
 		State:     StateConnected,
 		Channel:   make(chan jsonRPCResponse, messageChannelBufferSize),
 		CreatedAt: time.Now(),
 	}
-	cm.connections[id] = conn
+
+	cm.connections[strings.ToLower(id)] = conn
+	viper.Set("connection", cm.connections)
+	viper.WriteConfig()
 	return conn
 }
 
@@ -72,7 +113,8 @@ func (cm *ConnectionManager) NewConnection(id string) *Connection {
 func (cm *ConnectionManager) GetConnection(id string) *Connection {
 	cm.mutex.RLock()
 	defer cm.mutex.RUnlock()
-	return cm.connections[id]
+
+	return cm.connections[strings.ToLower(id)]
 }
 
 // UpdateState updates the state of a connection
@@ -80,8 +122,8 @@ func (cm *ConnectionManager) UpdateState(id string, state ConnectionState) bool 
 	cm.mutex.Lock()
 	defer cm.mutex.Unlock()
 
-	conn, exists := cm.connections[id]
-	if !exists {
+	conn, ok := cm.connections[strings.ToLower(id)]
+	if !ok {
 		return false
 	}
 
@@ -94,6 +136,9 @@ func (cm *ConnectionManager) UpdateState(id string, state ConnectionState) bool 
 		conn.InitializedAt = &now
 	}
 
+	viper.Set("connection", cm.connections)
+	viper.WriteConfig()
+
 	return true
 }
 
@@ -102,8 +147,8 @@ func (cm *ConnectionManager) RemoveConnection(id string) bool {
 	cm.mutex.Lock()
 	defer cm.mutex.Unlock()
 
-	conn, exists := cm.connections[id]
-	if !exists {
+	conn, ok := cm.connections[strings.ToLower(id)]
+	if !ok {
 		return false
 	}
 
@@ -115,7 +160,9 @@ func (cm *ConnectionManager) RemoveConnection(id string) bool {
 		close(conn.Channel)
 	}
 
-	delete(cm.connections, id)
+	viper.Set("connection", cm.connections)
+	viper.WriteConfig()
+
 	return true
 }
 
@@ -123,6 +170,7 @@ func (cm *ConnectionManager) RemoveConnection(id string) bool {
 func (cm *ConnectionManager) GetConnectionCount() int {
 	cm.mutex.RLock()
 	defer cm.mutex.RUnlock()
+
 	return len(cm.connections)
 }
 

@@ -869,9 +869,15 @@ func handleToolCallJSONRPC(connID string, req *jsonRPCRequest, toolSet *mcp.Tool
 		log.Printf("Error executing tool call '%s': %v", params.ToolName, execErr)
 		resultPayload = ToolResultPayload{
 			IsError: true,
-			Error: &MCPError{
-				Message: fmt.Sprintf("Failed to execute tool '%s': %v", params.ToolName, execErr),
+			Content: []ToolResultContent{
+				{
+					Type: "text",
+					Text: fmt.Sprintf("Failed to execute tool '%s': %v", params.ToolName, execErr),
+				},
 			},
+			// Error: &MCPError{
+			// 	Message: fmt.Sprintf("Failed to execute tool '%s': %v", params.ToolName, execErr),
+			// },
 			ToolCallID: fmt.Sprintf("%v", req.ID),
 		}
 	} else {
@@ -881,8 +887,11 @@ func handleToolCallJSONRPC(connID string, req *jsonRPCRequest, toolSet *mcp.Tool
 			log.Printf("Error reading response body for tool '%s': %v", params.ToolName, readErr)
 			resultPayload = ToolResultPayload{
 				IsError: true,
-				Error: &MCPError{
-					Message: fmt.Sprintf("Failed to read response from tool '%s': %v", params.ToolName, readErr),
+				Content: []ToolResultContent{
+					{
+						Type: "text",
+						Text: fmt.Sprintf("Failed to read response from tool '%s': %v", params.ToolName, readErr),
+					},
 				},
 				ToolCallID: fmt.Sprintf("%v", req.ID),
 			}
@@ -892,11 +901,17 @@ func handleToolCallJSONRPC(connID string, req *jsonRPCRequest, toolSet *mcp.Tool
 			if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 				resultPayload = ToolResultPayload{
 					IsError: true,
-					Error: &MCPError{
-						Code:    httpResp.StatusCode,
-						Message: fmt.Sprintf("Tool '%s' API call failed with status %s", params.ToolName, httpResp.Status),
-						Data:    string(bodyBytes), // Include response body in error data
+					Content: []ToolResultContent{
+						{
+							Type: "text",
+							Text: fmt.Sprintf("Tool '%s' API call failed with status %s", params.ToolName, httpResp.Status),
+						},
 					},
+					// Error: &MCPError{
+					// 	Code:    httpResp.StatusCode,
+					// 	Message: fmt.Sprintf("Tool '%s' API call failed with status %s", params.ToolName, httpResp.Status),
+					// 	Data:    string(bodyBytes), // Include response body in error data
+					// },
 					ToolCallID: fmt.Sprintf("%v", req.ID),
 				}
 			} else {

@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ckanthony/openapi-mcp/pkg/config"
-	"github.com/ckanthony/openapi-mcp/pkg/mcp"
 	"github.com/google/uuid"
+	"github.com/litui/openapi-mcp-claude/pkg/config"
+	"github.com/litui/openapi-mcp-claude/pkg/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

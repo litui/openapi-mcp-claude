@@ -1,11 +1,4 @@
-# OpenAPI-MCP: Dockerized MCP Server to allow your AI agent to access any API with existing api docs
-
-[![Go Reference](https://pkg.go.dev/badge/github.com/ckanthony/openapi-mcp.svg)](https://pkg.go.dev/github.com/ckanthony/openapi-mcp)
-[![CI](https://github.com/ckanthony/openapi-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ckanthony/openapi-mcp/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/ckanthony/openapi-mcp/branch/main/graph/badge.svg)](https://codecov.io/gh/ckanthony/openapi-mcp)
-![](https://badge.mcpx.dev?type=dev 'MCP Dev')
-
-![openapi-mcp logo](openapi-mcp.png)
+# Claude-specific OpenAPI-MCP: Dockerized MCP Server to allow your AI agent to access any API with existing api docs
 
 **Generate MCP tool definitions directly from a Swagger/OpenAPI specification file.**
 
@@ -21,12 +14,6 @@ OpenAPI-MCP is a dockerized MCP server that reads a `swagger.json` or `openapi.y
 -   [Running the Weatherbit Example (Step-by-Step)](#running-the-weatherbit-example-step-by-step)
 -   [Command-Line Options](#command-line-options)
     -   [Environment Variables](#environment-variables)
-
-## Demo
-
-Run the demo yourself: [Running the Weatherbit Example (Step-by-Step)](#running-the-weatherbit-example-step-by-step)
-
-![demo](https://github.com/user-attachments/assets/4d457137-5da4-422a-b323-afd4b175bd56)
 
 ## Why OpenAPI-MCP?
 
@@ -52,27 +39,16 @@ Run the demo yourself: [Running the Weatherbit Example (Step-by-Step)](#running-
 
 ### Docker
 
-The recommended way to run this tool is via [Docker](https://hub.docker.com/r/ckanthony/openapi-mcp).
+The recommended way to run this tool is via Docker.
 
-#### Using the Pre-built Docker Hub Image (Recommended)
-
-Alternatively, you can use the pre-built image available on [Docker Hub](https://hub.docker.com/r/ckanthony/openapi-mcp).
-
-1.  **Pull the Image:**
-    ```bash
-    docker pull ckanthony/openapi-mcp:latest
-    ```
-2.  **Run the Container:**
-    Follow the `docker run` examples above, but replace `openapi-mcp:latest` with `ckanthony/openapi-mcp:latest`.
-
-#### Building Locally (Optional)
+#### Building Locally
 
 1.  **Build the Docker Image Locally:**
     ```bash
     # Navigate to the repository root
-    cd openapi-mcp
-    # Build the Docker image (tag it as you like, e.g., openapi-mcp:latest)
-    docker build -t openapi-mcp:latest .
+    cd openapi-mcp-claude
+    # Build the Docker image (tag it as you like, e.g., openapi-mcp-claude:latest)
+    docker build -t openapi-mcp-claude:latest .
     ```
 
 2.  **Run the Container:**
@@ -82,25 +58,26 @@ Alternatively, you can use the pre-built image available on [Docker Hub](https:/
         -   Create a directory (e.g., `./my-api`) containing your `openapi.json` or `swagger.yaml`.
         -   If the API requires a key, create a `.env` file in the *same directory* (e.g., `./my-api/.env`) with `API_KEY=your_actual_key` (replace `API_KEY` if your `--api-key-env` flag is different).
         ```bash
-        docker run -p 8080:8080 --rm \\
-            -v $(pwd)/my-api:/app/spec \\
-            --env-file $(pwd)/my-api/.env \\
-            openapi-mcp:latest \\
-            --spec /app/spec/openapi.json \\
-            --api-key-env API_KEY \\
-            --api-key-name X-API-Key \\
+        docker run -p 8080:8080 --rm \
+            -v ./my-api:/app/spec \
+            --env-file ./my-api/.env \
+            openapi-mcp-claude:latest \
+            --spec /app/spec/openapi.json \
+            --base-url https://example.com \
+            --api-key-env API_KEY \
+            --api-key-name X-Api-Key \
             --api-key-loc header
         ```
         *(Adjust `--spec`, `--api-key-env`, `--api-key-name`, `--api-key-loc`, and `-p` as needed.)*
 
     *   **Example 2: Using a remote spec URL and direct environment variable:**
         ```bash
-        docker run -p 8080:8080 --rm \\
-            -e SOME_API_KEY="your_actual_key" \\
-            openapi-mcp:latest \\
-            --spec https://petstore.swagger.io/v2/swagger.json \\
+        docker run -p 8080:8080 --rm \
+            -e SOME_API_KEY="your_actual_key" \
+            openapi-mcp-claude:latest \
+            --spec https://petstore.swagger.io/v2/swagger.json \
             --api-key-env SOME_API_KEY \\
-            --api-key-name api_key \\
+            --api-key-name api_key \
             --api-key-loc header
         ```
 
@@ -116,73 +93,40 @@ Alternatively, you can use the pre-built image available on [Docker Hub](https:/
         *   `--api-key-env`, `--api-key-name`, `--api-key-loc`: Required if the target API needs an API key.
         *   (See `--help` for all command-line options by running `docker run --rm openapi-mcp:latest --help`)
 
+### Configuring Claude Code
 
-## Running the Weatherbit Example (Step-by-Step)
+Edit your `~/.claude.json` to include the following section:
 
-This repository includes an example using the [Weatherbit API](https://www.weatherbit.io/). Here's how to run it using the public Docker image:
+```json
+"mcpServers": {
+    "openapi-mcp": {
+        "type": "http",
+        "url": "http://localhost:8080/messages",
+        "headers": {
+            "Mcp-Session-Id": "YOUR_GUID_GOES_HERE"
+        }
+    }
+}
+```
 
-1.  **Find OpenAPI Specs (Optional Knowledge):**
-    Many public APIs have their OpenAPI/Swagger specifications available online. A great resource for discovering them is [APIs.guru](https://apis.guru/). The Weatherbit specification used in this example (`weatherbitio-swagger.json`) was sourced from there.
+### Configuring Claude Desktop
 
-2.  **Get a Weatherbit API Key:**
-    *   Go to [Weatherbit.io](https://www.weatherbit.io/) and sign up for an account (they offer a free tier).
-    *   Find your API key in your Weatherbit account dashboard.
+In Claude Desktop you will need to use the mcp-remote@latest npx or docker image. Follow instructions for installation of mcp-remote@latest globally in your environment and then set up your `claude_desktop_config.json` to resemble the following:
 
-3.  **Clone this Repository:**
-    You need the example files from this repository.
-    ```bash
-    git clone https://github.com/ckanthony/openapi-mcp.git
-    cd openapi-mcp
-    ```
-
-4.  **Prepare Environment File:**
-    *   Navigate to the example directory: `cd example/weather`
-    *   Copy the example environment file: `cp .env.example .env`
-    *   Edit the new `.env` file and replace `YOUR_WEATHERBIT_API_KEY_HERE` with the actual API key you obtained from Weatherbit.
-
-5.  **Run the Docker Container:**
-    From the `openapi-mcp` **root directory** (the one containing the `example` folder), run the following command:
-    ```bash
-    docker run -p 8080:8080 --rm \\
-        -v $(pwd)/example/weather:/app/spec \\
-        --env-file $(pwd)/example/weather/.env \\
-        ckanthony/openapi-mcp:latest \\
-        --spec /app/spec/weatherbitio-swagger.json \\
-        --api-key-env API_KEY \\
-        --api-key-name key \\
-        --api-key-loc query
-    ```
-    *   `-v $(pwd)/example/weather:/app/spec`: Mounts the local `example/weather` directory (containing the spec and `.env` file) to `/app/spec` inside the container.
-    *   `--env-file $(pwd)/example/weather/.env`: Tells Docker to load environment variables (specifically `API_KEY`) from your `.env` file.
-    *   `ckanthony/openapi-mcp:latest`: Uses the public Docker image.
-    *   `--spec /app/spec/weatherbitio-swagger.json`: Points to the spec file inside the container.
-    *   The `--api-key-*` flags configure how the tool should inject the API key (read from the `API_KEY` env var, named `key`, placed in the `query` string).
-
-6.  **Access the MCP Server:**
-    The MCP server should now be running and accessible at `http://localhost:8080` for compatible clients.
-
-**Using Docker Compose (Example):**
-
-A `docker-compose.yml` file is provided in the `example/` directory to demonstrate running the Weatherbit API example using the *locally built* image.
-
-1.  **Prepare Environment File:** Copy `example/weather/.env.example` to `example/weather/.env` and add your actual Weatherbit API key:
-    ```dotenv
-    # example/weather/.env
-    API_KEY=YOUR_ACTUAL_WEATHERBIT_KEY
-    ```
-
-2.  **Run with Docker Compose:** Navigate to the `example` directory and run:
-    ```bash
-    cd example
-    # This builds the image locally based on ../Dockerfile
-    # It does NOT use the public Docker Hub image
-    docker-compose up --build
-    ```
-    *   `--build`: Forces Docker Compose to build the image using the `Dockerfile` in the project root before starting the service.
-    *   Compose will read `example/docker-compose.yml`, build the image, mount `./weather`, read `./weather/.env`, and start the `openapi-mcp` container with the specified command-line arguments.
-    *   The MCP server will be available at `http://localhost:8080`.
-
-3.  **Stop the service:** Press `Ctrl+C` in the terminal where Compose is running, or run `docker-compose down` from the `example` directory in another terminal.
+```json
+"mcpServers": {
+    "openWebui": {
+        "command": "npx",
+        "args": [
+            "mcp-remote@latest",
+            "http://localhost:8080/messages",
+            "--allow-http",
+            "--header",
+            "Mcp-Session-Id:YOUR_GUID_GOES_HERE"
+        ]
+    }
+}
+```
 
 ## Command-Line Options
 
@@ -203,8 +147,9 @@ The `openapi-mcp` command accepts the following flags:
 | `--base-url`         | Manually override the target API server base URL detected from the spec.                                              | `string`      | (none)                           |
 | `--name`             | Default name for the generated MCP toolset (used if spec has no title).                                             | `string`      | "OpenAPI-MCP Tools"            |
 | `--desc`             | Default description for the generated MCP toolset (used if spec has no description).                                | `string`      | "Tools generated from OpenAPI spec" |
+| `--state-file-path`  | Path to the state file used to track sessions. | `string` | "/tmp/openapi-conn-state.yaml" |
 
-**Note:** You can get this list by running the tool with the `--help` flag (e.g., `docker run --rm ckanthony/openapi-mcp:latest --help`).
+**Note:** You can get this list by running the tool with the `--help` flag (e.g., `docker run --rm openapi-mcp-claude:latest --help`).
 
 ### Environment Variables
 

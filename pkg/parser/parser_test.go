@@ -14,8 +14,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ckanthony/openapi-mcp/pkg/config"
-	"github.com/ckanthony/openapi-mcp/pkg/mcp"
+	"github.com/litui/openapi-mcp-claude/pkg/config"
+	"github.com/litui/openapi-mcp-claude/pkg/mcp"
 )
 
 // Minimal valid OpenAPI V3 spec (JSON string)

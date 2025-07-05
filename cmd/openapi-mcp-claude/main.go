@@ -8,10 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/ckanthony/openapi-mcp/pkg/config"
-	"github.com/ckanthony/openapi-mcp/pkg/parser"
-	"github.com/ckanthony/openapi-mcp/pkg/server"
 	"github.com/joho/godotenv"
+	"github.com/litui/openapi-mcp-claude/pkg/config"
+	"github.com/litui/openapi-mcp-claude/pkg/parser"
+	"github.com/litui/openapi-mcp-claude/pkg/server"
 	"github.com/spf13/viper"
 )
 

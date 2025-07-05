@@ -13,11 +13,11 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ckanthony/openapi-mcp/pkg/config"
-	"github.com/ckanthony/openapi-mcp/pkg/mcp"
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/go-openapi/loads"
 	"github.com/go-openapi/spec"
+	"github.com/litui/openapi-mcp-claude/pkg/config"
+	"github.com/litui/openapi-mcp-claude/pkg/mcp"
 )
 
 const (

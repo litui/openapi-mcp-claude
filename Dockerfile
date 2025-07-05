@@ -19,7 +19,7 @@ ARG TARGETARCH
 # Build the static binary for the command-line tool
 # CGO_ENABLED=0 produces a static binary, important for distroless/scratch images
 # -ldflags="-s -w" strips debug symbols and DWARF info, reducing binary size
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-s -w" -o /openapi-mcp ./cmd/openapi-mcp/main.go
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-s -w" -o /openapi-mcp-claude ./cmd/openapi-mcp-claude/main.go
 
 # --- Final Stage ---
 # Use a minimal base image. distroless/static is very small and secure.
@@ -28,7 +28,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-s -w
 FROM gcr.io/distroless/static-debian12 AS final
 
 # Copy the static binary from the builder stage
-COPY --from=builder /openapi-mcp /openapi-mcp
+COPY --from=builder /openapi-mcp-claude /openapi-mcp-claude
 
 # Copy example files (optional, but useful for demonstrating)
 COPY example /app/example
@@ -37,7 +37,7 @@ WORKDIR /app
 
 # Define the default command to run when the container starts
 # Users can override this command or provide arguments like --spec, --port etc.
-ENTRYPOINT ["/openapi-mcp"]
+ENTRYPOINT ["/openapi-mcp-claude"]
 
 # Expose the default port (optional, good documentation)
 EXPOSE 8080 

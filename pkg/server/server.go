@@ -14,8 +14,8 @@ import (
 	// "fmt" // No longer needed here
 	// "sync" // No longer needed here
 
-	"github.com/ckanthony/openapi-mcp/pkg/config"
-	"github.com/ckanthony/openapi-mcp/pkg/mcp"
+	"github.com/litui/openapi-mcp-claude/pkg/config"
+	"github.com/litui/openapi-mcp-claude/pkg/mcp"
 	// Import UUID package
 )
 

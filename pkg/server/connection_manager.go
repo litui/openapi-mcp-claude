@@ -53,24 +53,12 @@ type ConnectionManager struct {
 
 // NewConnectionManager creates a new connection manager
 func NewConnectionManager() *ConnectionManager {
-	viper.SetConfigFile("/app/spec/openapi-mcp-state.yaml")
 
 	connections := make(map[string]*Connection)
-	// cmBytes, err := yaml.Marshal(connections)
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
 
-	if err := viper.ReadInConfig(); err != nil {
-		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
-			if !viper.IsSet("connection") {
-				viper.Set("connection", connections)
-				viper.WriteConfig()
-			}
-		} else {
-			viper.Set("connection", connections)
-			viper.WriteConfig()
-		}
+	if !viper.IsSet("connection") {
+		viper.Set("connection", connections)
+		viper.WriteConfig()
 	} else {
 		tempCm := viper.GetStringMap("connection")
 		for m, c := range tempCm {

@@ -2,7 +2,6 @@ package server
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,7 +16,6 @@ import (
 
 	"github.com/ckanthony/openapi-mcp/pkg/config"
 	"github.com/ckanthony/openapi-mcp/pkg/mcp"
-	"github.com/google/uuid"
 	// Import UUID package
 )
 
@@ -99,48 +97,6 @@ const messageChannelBufferSize = 10
 func ServeMCP(addr string, toolSet *mcp.ToolSet, cfg *config.Config) error {
 	log.Printf("Preparing ToolSet for MCP...")
 
-	// --- Handler Functions ---
-	sseHandler := func(w http.ResponseWriter, r *http.Request) {
-		// CORS Headers (Apply to all relevant requests)
-		w.Header().Set("Access-Control-Allow-Origin", "*") // Be more specific in production
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
-
-		if r.Method == http.MethodOptions {
-			log.Println("Responding to OPTIONS request")
-			w.WriteHeader(http.StatusNoContent) // Use 204 No Content for OPTIONS
-			return
-		}
-
-		// SSE connections can be GET type
-		if r.Method == http.MethodGet {
-			httpMethodGetHandler(w, r, false) // Handle SSE connection setup
-		} else {
-			log.Printf("Method Not Allowed: %s", r.Method)
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-		}
-	}
-
-	postHandler := func(w http.ResponseWriter, r *http.Request) {
-		// CORS Headers (Apply to all relevant requests)
-		w.Header().Set("Access-Control-Allow-Origin", "*") // Be more specific in production
-		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
-
-		if r.Method == http.MethodOptions {
-			log.Println("Responding to OPTIONS request")
-			w.WriteHeader(http.StatusNoContent) // Use 204 No Content for OPTIONS
-			return
-		}
-
-		if r.Method == http.MethodPost {
-			httpMethodPostHandler(w, r, toolSet, cfg, false) // Handle SSE connection setup
-		} else {
-			log.Printf("Method Not Allowed: %s", r.Method)
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-		}
-	}
-
 	streamableHandler := func(w http.ResponseWriter, r *http.Request) {
 		// CORS Headers (Apply to all relevant requests)
 		w.Header().Set("Access-Control-Allow-Origin", "*") // Be more specific in production
@@ -155,9 +111,11 @@ func ServeMCP(addr string, toolSet *mcp.ToolSet, cfg *config.Config) error {
 		}
 
 		if r.Method == http.MethodGet {
-			httpMethodGetHandler(w, r, true) // Handle SSE connection setup
+			// Not set up yet. Claude seems to default to just POST so I'm not too worried.
+			// httpMethodGetHandler(w, r, true)
 		} else if r.Method == http.MethodPost {
 			httpMethodPostHandler(w, r, toolSet, cfg, true)
+			// Claude doesn't send Mcp-Session-Id by default, so just set it statically in your config.
 			connID := r.Header.Get("Mcp-Session-Id")
 			if connID != "" {
 				conn := mcpConnectionManager.GetConnection(connID)
@@ -178,8 +136,8 @@ func ServeMCP(addr string, toolSet *mcp.ToolSet, cfg *config.Config) error {
 	// Setup server mux
 	mux := http.NewServeMux()
 	// See: https://www.claudemcp.com/specification
-	mux.HandleFunc("/mcp", sseHandler)                 // Single endpoint for GET/POST/OPTIONS
-	mux.HandleFunc("/mcp/{connectionId}", postHandler) // Specific endpoint for HTTP+SSE requests
+	// mux.HandleFunc("/mcp", sseHandler)                 // Single endpoint for GET/POST/OPTIONS
+	// mux.HandleFunc("/mcp/{connectionId}", postHandler) // Specific endpoint for HTTP+SSE requests
 
 	// See: https://blog.christianposta.com/ai/understanding-mcp-recent-change-around-http-sse/
 	mux.HandleFunc("/messages", streamableHandler)
@@ -189,140 +147,140 @@ func ServeMCP(addr string, toolSet *mcp.ToolSet, cfg *config.Config) error {
 }
 
 // httpMethodSSEHandler handles the initial GET request to establish the SSE connection.
-func httpMethodGetHandler(w http.ResponseWriter, r *http.Request, streamable bool) {
-	log.Printf("Inbound SSE connection received to %s, type %s.", r.Host, r.Method)
-	connectionID := uuid.New().String()
+// func httpMethodGetHandler(w http.ResponseWriter, r *http.Request, streamable bool) {
+// 	log.Printf("Inbound SSE connection received to %s, type %s.", r.Host, r.Method)
+// 	connectionID := uuid.New().String()
 
-	// --- Setup connection via connection manager ---
-	conn := mcpConnectionManager.NewConnection(connectionID)
-	log.Printf("Registered connection %s. Active connections: %d", connectionID, mcpConnectionManager.GetConnectionCount())
+// 	// --- Setup connection via connection manager ---
+// 	conn := mcpConnectionManager.NewConnection(connectionID)
+// 	log.Printf("Registered connection %s. Active connections: %d", connectionID, mcpConnectionManager.GetConnectionCount())
 
-	// --- Cleanup function ---
-	cleanup := func() {
-		mcpConnectionManager.RemoveConnection(connectionID)
-		log.Printf("Removed connection %s. Active connections: %d", connectionID, mcpConnectionManager.GetConnectionCount())
-	}
-	defer cleanup()
+// 	// --- Cleanup function ---
+// 	cleanup := func() {
+// 		mcpConnectionManager.RemoveConnection(connectionID)
+// 		log.Printf("Removed connection %s. Active connections: %d", connectionID, mcpConnectionManager.GetConnectionCount())
+// 	}
+// 	defer cleanup()
 
-	log.Printf("SSE client connecting: %s (Using ID: %s)", r.RemoteAddr, connectionID)
+// 	log.Printf("SSE client connecting: %s (Using ID: %s)", r.RemoteAddr, connectionID)
 
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "Streaming unsupported!", http.StatusInternalServerError)
-		log.Println("Error: Client connection does not support flushing")
-		return
-	}
+// 	flusher, ok := w.(http.Flusher)
+// 	if !ok {
+// 		http.Error(w, "Streaming unsupported!", http.StatusInternalServerError)
+// 		log.Println("Error: Client connection does not support flushing")
+// 		return
+// 	}
 
-	// --- Set headers FIRST ---
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	// CORS headers are set in the main handler
-	w.Header().Set("X-Accel-Buffering", "no") // Useful for proxies like Nginx
-	w.WriteHeader(http.StatusOK)              // Write headers and status code
-	flusher.Flush()                           // Ensure headers are sent immediately
+// 	// --- Set headers FIRST ---
+// 	w.Header().Set("Content-Type", "text/event-stream")
+// 	w.Header().Set("Cache-Control", "no-cache")
+// 	w.Header().Set("Connection", "keep-alive")
+// 	// CORS headers are set in the main handler
+// 	w.Header().Set("X-Accel-Buffering", "no") // Useful for proxies like Nginx
+// 	w.WriteHeader(http.StatusOK)              // Write headers and status code
+// 	flusher.Flush()                           // Ensure headers are sent immediately
 
-	// --- Send initial :ok --- (Must happen *after* headers)
-	if _, err := fmt.Fprintf(w, ":ok\n\n"); err != nil {
-		log.Printf("Error sending SSE preamble to %s (ID: %s): %v", r.RemoteAddr, connectionID, err)
-		return // Cannot proceed if preamble fails
-	}
-	flusher.Flush()
-	log.Printf("Sent :ok preamble to %s (ID: %s)", r.RemoteAddr, connectionID)
+// 	// --- Send initial :ok --- (Must happen *after* headers)
+// 	if _, err := fmt.Fprintf(w, ":ok\n\n"); err != nil {
+// 		log.Printf("Error sending SSE preamble to %s (ID: %s): %v", r.RemoteAddr, connectionID, err)
+// 		return // Cannot proceed if preamble fails
+// 	}
+// 	flusher.Flush()
+// 	log.Printf("Sent :ok preamble to %s (ID: %s)", r.RemoteAddr, connectionID)
 
-	// --- Send initial SSE events --- (endpoint, mcp-ready)
-	endpointURL := fmt.Sprintf("http://%s/mcp/%s", r.Host, connectionID)
-	if err := writeSSEEvent(w, "endpoint", endpointURL); err != nil {
-		log.Printf("Error sending SSE endpoint event to %s (ID: %s): %v", r.RemoteAddr, connectionID, err)
-		return
-	}
-	flusher.Flush()
-	log.Printf("Sent endpoint event to %s (ID: %s)", r.RemoteAddr, connectionID)
+// 	// --- Send initial SSE events --- (endpoint, mcp-ready)
+// 	endpointURL := fmt.Sprintf("http://%s/mcp/%s", r.Host, connectionID)
+// 	if err := writeSSEEvent(w, "endpoint", endpointURL); err != nil {
+// 		log.Printf("Error sending SSE endpoint event to %s (ID: %s): %v", r.RemoteAddr, connectionID, err)
+// 		return
+// 	}
+// 	flusher.Flush()
+// 	log.Printf("Sent endpoint event to %s (ID: %s)", r.RemoteAddr, connectionID)
 
-	// --- Goroutine to write messages from channel to SSE stream ---
-	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
+// 	// --- Goroutine to write messages from channel to SSE stream ---
+// 	ctx, cancel := context.WithCancel(r.Context())
+// 	defer cancel()
 
-	go func() {
-		log.Printf("[SSE Writer %s] Starting message writer goroutine", connectionID)
-		defer log.Printf("[SSE Writer %s] Exiting message writer goroutine", connectionID)
-		for {
-			select {
-			case <-ctx.Done():
-				return // Exit if main context is cancelled
-			case resp, ok := <-conn.Channel:
-				if !ok {
-					log.Printf("[SSE Writer %s] Message channel closed.", connectionID)
-					return // Exit if channel is closed
-				}
-				log.Printf("[SSE Writer %s] Sending message (ID: %v) via SSE", connectionID, resp.ID)
-				if err := writeSSEEvent(w, "message", resp); err != nil {
-					log.Printf("[SSE Writer %s] Error writing message to SSE stream: %v. Cancelling context.", connectionID, err)
-					cancel() // Signal main loop to exit on write error
-					return
-				}
-				flusher.Flush() // Flush after writing message
-			}
-		}
-	}()
+// 	go func() {
+// 		log.Printf("[SSE Writer %s] Starting message writer goroutine", connectionID)
+// 		defer log.Printf("[SSE Writer %s] Exiting message writer goroutine", connectionID)
+// 		for {
+// 			select {
+// 			case <-ctx.Done():
+// 				return // Exit if main context is cancelled
+// 			case resp, ok := <-conn.Channel:
+// 				if !ok {
+// 					log.Printf("[SSE Writer %s] Message channel closed.", connectionID)
+// 					return // Exit if channel is closed
+// 				}
+// 				log.Printf("[SSE Writer %s] Sending message (ID: %v) via SSE", connectionID, resp.ID)
+// 				if err := writeSSEEvent(w, "message", resp); err != nil {
+// 					log.Printf("[SSE Writer %s] Error writing message to SSE stream: %v. Cancelling context.", connectionID, err)
+// 					cancel() // Signal main loop to exit on write error
+// 					return
+// 				}
+// 				flusher.Flush() // Flush after writing message
+// 			}
+// 		}
+// 	}()
 
-	// --- Keep connection alive (main loop) ---
-	keepAliveTicker := time.NewTicker(20 * time.Second)
-	defer keepAliveTicker.Stop()
+// 	// --- Keep connection alive (main loop) ---
+// 	keepAliveTicker := time.NewTicker(20 * time.Second)
+// 	defer keepAliveTicker.Stop()
 
-	log.Printf("[SSE %s] Entering keep-alive loop", connectionID)
-	for {
-		select {
-		case <-ctx.Done():
-			log.Printf("[SSE %s] Context done. Exiting keep-alive loop.", connectionID)
-			return // Exit loop if context cancelled (client disconnect or write error)
-		case <-keepAliveTicker.C:
-			// Send SSE keep-alive comment instead of JSON-RPC ping during initialization
-			if _, err := fmt.Fprintf(w, ": keep-alive\n\n"); err != nil {
-				log.Printf("[SSE %s] Error sending keep-alive comment: %v. Closing connection.", connectionID, err)
-				cancel() // Signal writer goroutine and exit
-				return
-			}
-			flusher.Flush()
-		}
-	}
-}
+// 	log.Printf("[SSE %s] Entering keep-alive loop", connectionID)
+// 	for {
+// 		select {
+// 		case <-ctx.Done():
+// 			log.Printf("[SSE %s] Context done. Exiting keep-alive loop.", connectionID)
+// 			return // Exit loop if context cancelled (client disconnect or write error)
+// 		case <-keepAliveTicker.C:
+// 			// Send SSE keep-alive comment instead of JSON-RPC ping during initialization
+// 			if _, err := fmt.Fprintf(w, ": keep-alive\n\n"); err != nil {
+// 				log.Printf("[SSE %s] Error sending keep-alive comment: %v. Closing connection.", connectionID, err)
+// 				cancel() // Signal writer goroutine and exit
+// 				return
+// 			}
+// 			flusher.Flush()
+// 		}
+// 	}
+// }
 
 // writeSSEEvent formats and writes data as a Server-Sent Event.
-func writeSSEEvent(w http.ResponseWriter, eventName string, data interface{}) error {
-	buffer := bytes.Buffer{}
-	if eventName != "" {
-		buffer.WriteString(fmt.Sprintf("event: %s\n", eventName))
-	}
+// func writeSSEEvent(w http.ResponseWriter, eventName string, data interface{}) error {
+// 	buffer := bytes.Buffer{}
+// 	if eventName != "" {
+// 		buffer.WriteString(fmt.Sprintf("event: %s\n", eventName))
+// 	}
 
-	// Marshal data to JSON if it's not a simple string already
-	var dataStr string
-	if strData, ok := data.(string); ok && eventName == "endpoint" { // Special case for endpoint URL
-		dataStr = strData
-	} else {
-		jsonData, err := json.Marshal(data)
-		if err != nil {
-			return fmt.Errorf("failed to marshal data for SSE event '%s': %w", eventName, err)
-		}
-		dataStr = string(jsonData)
-	}
+// 	// Marshal data to JSON if it's not a simple string already
+// 	var dataStr string
+// 	if strData, ok := data.(string); ok && eventName == "endpoint" { // Special case for endpoint URL
+// 		dataStr = strData
+// 	} else {
+// 		jsonData, err := json.Marshal(data)
+// 		if err != nil {
+// 			return fmt.Errorf("failed to marshal data for SSE event '%s': %w", eventName, err)
+// 		}
+// 		dataStr = string(jsonData)
+// 	}
 
-	// Write data line(s). Split multiline JSON for proper SSE formatting.
-	lines := strings.Split(dataStr, "\n")
-	for _, line := range lines {
-		buffer.WriteString(fmt.Sprintf("data: %s\n", line))
-	}
+// 	// Write data line(s). Split multiline JSON for proper SSE formatting.
+// 	lines := strings.Split(dataStr, "\n")
+// 	for _, line := range lines {
+// 		buffer.WriteString(fmt.Sprintf("data: %s\n", line))
+// 	}
 
-	// Add final newline
-	buffer.WriteString("\n")
+// 	// Add final newline
+// 	buffer.WriteString("\n")
 
-	// Write to the response writer
-	_, err := w.Write(buffer.Bytes())
-	if err != nil {
-		return fmt.Errorf("failed to write SSE event '%s': %w", eventName, err)
-	}
-	return nil
-}
+// 	// Write to the response writer
+// 	_, err := w.Write(buffer.Bytes())
+// 	if err != nil {
+// 		return fmt.Errorf("failed to write SSE event '%s': %w", eventName, err)
+// 	}
+// 	return nil
+// }
 
 // httpMethodPostHandler handles incoming POST requests containing MCP messages.
 func httpMethodPostHandler(w http.ResponseWriter, r *http.Request, toolSet *mcp.ToolSet, cfg *config.Config, standalone bool) {
@@ -943,15 +901,15 @@ func handleToolCallJSONRPC(connID string, req *jsonRPCRequest, toolSet *mcp.Tool
 
 // sendJSONRPCResponse sends a JSON-RPC response *synchronously*.
 // Keep this for now for sending synchronous errors on POST decode/read failures.
-func sendJSONRPCResponse(w http.ResponseWriter, resp jsonRPCResponse) {
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		log.Printf("Error encoding JSON-RPC response (ID: %v) for ConnID %v: %v", resp.ID, resp.Error, err)
-		// Attempt to send a plain text error if JSON encoding fails
-		tryWriteHTTPError(w, http.StatusInternalServerError, "Internal Server Error encoding JSON-RPC response")
-	}
-	log.Printf("Sent JSON-RPC response: Method=%s, ID=%v", getMethodFromResponse(resp), resp.ID)
-}
+// func sendJSONRPCResponse(w http.ResponseWriter, resp jsonRPCResponse) {
+// 	w.Header().Set("Content-Type", "application/json")
+// 	if err := json.NewEncoder(w).Encode(resp); err != nil {
+// 		log.Printf("Error encoding JSON-RPC response (ID: %v) for ConnID %v: %v", resp.ID, resp.Error, err)
+// 		// Attempt to send a plain text error if JSON encoding fails
+// 		tryWriteHTTPError(w, http.StatusInternalServerError, "Internal Server Error encoding JSON-RPC response")
+// 	}
+// 	log.Printf("Sent JSON-RPC response: Method=%s, ID=%v", getMethodFromResponse(resp), resp.ID)
+// }
 
 // createJSONRPCError creates a JSON-RPC error response.
 func createJSONRPCError(id interface{}, code int, message string, data interface{}) jsonRPCResponse {
@@ -964,32 +922,32 @@ func createJSONRPCError(id interface{}, code int, message string, data interface
 }
 
 // sendJSONRPCError sends a JSON-RPC error response.
-func sendJSONRPCError(w http.ResponseWriter, connID string, id interface{}, code int, message string, data interface{}) {
-	resp := createJSONRPCError(id, code, message, data)
-	log.Printf("Sending JSON-RPC Error for ConnID %s, ID %v: Code=%d, Message='%s'", connID, id, code, message)
-	sendJSONRPCResponse(w, resp)
-}
+// func sendJSONRPCError(w http.ResponseWriter, connID string, id interface{}, code int, message string, data interface{}) {
+// 	resp := createJSONRPCError(id, code, message, data)
+// 	log.Printf("Sending JSON-RPC Error for ConnID %s, ID %v: Code=%d, Message='%s'", connID, id, code, message)
+// 	sendJSONRPCResponse(w, resp)
+// }
 
 // Helper to get the method name for logging purposes (from the result/error structure if possible)
-func getMethodFromResponse(resp jsonRPCResponse) string {
-	if resp.Result != nil {
-		// Attempt to infer method from result structure if it has a type field
-		if resMap, ok := resp.Result.(map[string]interface{}); ok {
-			if methodType, typeOk := resMap["type"].(string); typeOk {
-				return methodType + "_result"
-			}
-		}
-		// Infer based on known result types if possible
-		if _, ok := resp.Result.(map[string]interface{}); ok && resp.Result.(map[string]interface{})["tools"] != nil {
-			return "tool_set"
-		}
-		// If not easily identifiable, just indicate success
-		return "success"
-	} else if resp.Error != nil {
-		return "error"
-	}
-	return "unknown"
-}
+// func getMethodFromResponse(resp jsonRPCResponse) string {
+// 	if resp.Result != nil {
+// 		// Attempt to infer method from result structure if it has a type field
+// 		if resMap, ok := resp.Result.(map[string]interface{}); ok {
+// 			if methodType, typeOk := resMap["type"].(string); typeOk {
+// 				return methodType + "_result"
+// 			}
+// 		}
+// 		// Infer based on known result types if possible
+// 		if _, ok := resp.Result.(map[string]interface{}); ok && resp.Result.(map[string]interface{})["tools"] != nil {
+// 			return "tool_set"
+// 		}
+// 		// If not easily identifiable, just indicate success
+// 		return "success"
+// 	} else if resp.Error != nil {
+// 		return "error"
+// 	}
+// 	return "unknown"
+// }
 
 // tryWriteHTTPError attempts to write an HTTP error, ignoring failures.
 func tryWriteHTTPError(w http.ResponseWriter, code int, message string) {

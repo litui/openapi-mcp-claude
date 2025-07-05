@@ -12,6 +12,7 @@ import (
 	"github.com/ckanthony/openapi-mcp/pkg/parser"
 	"github.com/ckanthony/openapi-mcp/pkg/server"
 	"github.com/joho/godotenv"
+	"github.com/spf13/viper"
 )
 
 // stringSliceFlag allows defining a flag that can be repeated to collect multiple string values.
@@ -50,6 +51,8 @@ func main() {
 	defaultToolName := flag.String("name", "OpenAPI-MCP Tools", "Default name for the toolset")
 	defaultToolDesc := flag.String("desc", "Tools generated from OpenAPI spec", "Default description for the toolset")
 
+	stateFilePath := flag.String("state-file-path", "/tmp/openapi-conn-state.yaml", "Path to the connection state tracking file.")
+
 	// Parse flags *after* defining them all
 	flag.Parse()
 
@@ -87,6 +90,29 @@ func main() {
 		os.Exit(1)
 	}
 
+	if *stateFilePath == "" {
+		log.Println("Error: --state-file-path must not be empty.")
+		flag.Usage()
+		os.Exit(2)
+	}
+
+	viper.SetConfigFile(*stateFilePath)
+	if err := viper.ReadInConfig(); err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
+			if !viper.IsSet("connection") {
+				viper.Set("connection", map[string]*server.Connection{})
+				viper.WriteConfig()
+			}
+		} else {
+			viper.Set("connection", map[string]*server.Connection{})
+			err = viper.WriteConfig()
+			if err != nil {
+				log.Printf("Error: could not write to provided state-file-path %v", *stateFilePath)
+				os.Exit(3)
+			}
+		}
+	}
+
 	var apiKeyLocation config.APIKeyLocation
 	if *apiKeyLocStr != "" {
 		switch *apiKeyLocStr {
@@ -118,6 +144,7 @@ func main() {
 		DefaultToolName:   *defaultToolName,
 		DefaultToolDesc:   *defaultToolDesc,
 		CustomHeaders:     customHeadersEnv,
+		StateFilePath:     *stateFilePath,
 	}
 
 	log.Printf("Configuration loaded: %+v\n", cfg)

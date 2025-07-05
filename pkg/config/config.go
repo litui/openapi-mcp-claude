@@ -39,6 +39,8 @@ type Config struct {
 
 	// Server-side request modification
 	CustomHeaders string // Comma-separated list of headers (e.g., "Header1:Value1,Header2:Value2") to add to outgoing requests.
+
+	StateFilePath string // Configuration state file path
 }
 
 // GetAPIKey resolves the API key value, prioritizing the environment variable over the direct flag.
